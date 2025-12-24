@@ -1,58 +1,105 @@
+# 定义工作流的名称，会显示在 GitHub Actions 页面上
 name: CI/CD Pipeline
+
+# 定义触发工作流的事件
 on:
+  # 当代码推送到 main 分支时触发
   push:
     branches: [ main ]
+  # 当有针对 main 分支的 Pull Request 时触发
   pull_request:
     branches: [ main ]
+
+# 定义工作流中的作业
 jobs:
+  # 作业名称：构建并推送镜像
   build-and-push:
+    # 指定运行环境为自托管的 runner（而非 GitHub 提供的托管 runner）
     runs-on: self-hosted
+    
+    # 定义作业中的步骤
     steps:
+      # 步骤1：检出代码 - 将仓库代码克隆到 runner 上
       - name: Checkout code
         uses: actions/checkout@v3
+      
+      # 步骤2：登录到 GitHub Container Registry (ghcr.io)
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v2
         with:
+          # 指定容器注册中心地址
           registry: ghcr.io
+          # 使用仓库所有者作为用户名
           username: ${{ github.repository_owner }}
+          # 使用存储在 Secrets 中的个人访问令牌作为密码
           password: ${{ secrets.CR_PAT }}
+      
+      # 步骤3：设置 Docker Buildx - 用于支持多平台构建等高级功能
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+      
+      # 步骤4：构建 Docker 镜像并推送到注册中心
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
+          # 指定 Docker 构建上下文为当前目录
           context: .
+          # 启用推送功能
           push: true
+          # 为镜像添加两个标签：latest 和 commit SHA
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+      
+      # 步骤5：更新 GitOps 仓库 - 实现 GitOps 自动化部署
       - name: Update GitOps repository
+        # 指定使用 bash shell 执行脚本
         shell: bash
+        # 设置环境变量，从 Secrets 中获取 GitOps 仓库的访问令牌
         env:
           GIT_TOKEN: ${{ secrets.GITOPS_PAT }}
         run: |
-          # Configure git credential store
+          # 配置 git 凭证存储方式
           git config --global credential.helper store
+          # 将访问令牌写入凭证文件，用于后续的 git 操作认证
           echo "https://${GIT_TOKEN}:x-oauth-basic@github.com" > ~/.git-credentials
           
-          # Remove any existing gitops directory
+          # 删除可能存在的旧 gitops 目录，确保干净的克隆环境
           rm -rf gitops
           
-          # Clone repository using HTTPS URL without token
-          git clone https://github.com/rslim087a/grade-api-gitops.git gitops
+          # 克隆 GitOps 配置仓库
+          git clone https://github.com/alex-ibb/grade-api-gitops.git gitops
+          # 进入克隆的仓库目录
           cd gitops
           
+          # 根据操作系统类型使用不同的 sed 命令语法
+          # macOS (darwin) 的 sed 需要 -i '' 参数
           if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS: 更新 deployment.yaml 中的镜像标签为当前 commit SHA
             sed -i '' "s|image: ghcr.io/${{ github.repository }}:.*|image: ghcr.io/${{ github.repository }}:${{ github.sha }}|g" deployment.yaml
           else
+            # Linux: 更新 deployment.yaml 中的镜像标签为当前 commit SHA
             sed -i "s|image: ghcr.io/${{ github.repository }}:.*|image: ghcr.io/${{ github.repository }}:${{ github.sha }}|g" deployment.yaml
           fi
           
-          # Commit changes
+          # 配置 git 提交时使用的用户名
           git config --global user.name "GitHub Actions"
+          # 配置 git 提交时使用的邮箱
           git config --global user.email "actions@github.com"
+          # 将修改的 deployment.yaml 添加到暂存区
           git add deployment.yaml
-          git commit -m "Update image to ${{ github.sha }}"
           
-          # Push
-          git push -f https://${GIT_TOKEN}@github.com/rslim087a/grade-api-gitops.git main
+          # 检查暂存区是否有实际变更
+          # git diff --cached --quiet 在有变更时返回非零退出码
+          if ! git diff --cached --quiet; then
+            # 有变更：提交并推送
+            # 提交更改，提交信息包含新的镜像 SHA
+            git commit -m "Update image to ${{ github.sha }}"
+            
+            # 强制推送更改到 GitOps 仓库的 main 分支
+            # ArgoCD 或其他 GitOps 工具会检测到这个变更并自动部署
+            git push -f https://${GIT_TOKEN}@github.com/alex-ibb/grade-api-gitops.git main
+          else
+            # 无变更：跳过提交，优雅退出
+            echo "No changes to commit. Image tag is already up to date."
+          fi
